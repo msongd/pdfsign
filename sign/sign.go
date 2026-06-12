@@ -171,7 +171,7 @@ func (context *SignContext) SignPDF() error {
 	//
 	// Different TSA servers provide different response sizes, we
 	// might need to make this configurable or detect and store.
-	if context.SignData.TSA.URL != "" {
+	if context.SignData.TSA.URL != "" || context.SignData.TimestampFunction != nil {
 		context.SignatureMaxLength += uint32(hex.EncodedLen(9000))
 	}
 

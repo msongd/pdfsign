@@ -2,6 +2,7 @@ package sign
 
 import (
 	"bytes"
+	gocontext "context"
 	"crypto"
 	"crypto/x509"
 	"encoding/asn1"
@@ -28,7 +29,12 @@ func (context *SignContext) createSignaturePlaceholder() []byte {
 	signature_buffer.WriteString("<<\n")
 	signature_buffer.WriteString(" /Type /Sig\n")
 	signature_buffer.WriteString(" /Filter /Adobe.PPKLite\n")
-	signature_buffer.WriteString(" /SubFilter /adbe.pkcs7.detached\n")
+	if context.SignData.Signature.CAdES {
+		// PAdES (ETSI EN 319 142-1) part 2 signature.
+		signature_buffer.WriteString(" /SubFilter /ETSI.CAdES.detached\n")
+	} else {
+		signature_buffer.WriteString(" /SubFilter /adbe.pkcs7.detached\n")
+	}
 
 	signature_buffer.WriteString(context.createPropBuild())
 
@@ -176,7 +182,8 @@ func (context *SignContext) createSignaturePlaceholder() []byte {
 	//
 	// A timestamp can be embedded in a CMS binary data object (see 12.8.3.3, "CMS
 	// (PKCS #7) signatures").
-	if context.SignData.TSA.URL == "" && !context.SignData.Signature.Info.Date.IsZero() {
+	hasTimestamp := context.SignData.TSA.URL != "" || context.SignData.TimestampFunction != nil
+	if (context.SignData.Signature.CAdES || !hasTimestamp) && !context.SignData.Signature.Info.Date.IsZero() {
 		signature_buffer.WriteString(" /M ")
 		signature_buffer.WriteString(pdfDateTime(context.SignData.Signature.Info.Date))
 		signature_buffer.WriteString("\n")
@@ -300,17 +307,7 @@ func (context *SignContext) createSignature() ([]byte, error) {
 		// entire document, including the Document Time-stamp dictionary but excluding
 		// the TimeStampToken itself (the entry with key Contents).
 
-		timestamp_response, err := context.GetTSA(sign_content)
-		if err != nil {
-			return nil, fmt.Errorf("get timestamp: %w", err)
-		}
-
-		ts, err := timestamp.ParseResponse(timestamp_response)
-		if err != nil {
-			return nil, fmt.Errorf("parse timestamp: %w", err)
-		}
-
-		return ts.RawToken, nil
+		return context.getTimestampToken(sign_content)
 	}
 
 	// Initialize pkcs7 signer.
@@ -325,14 +322,22 @@ func (context *SignContext) createSignature() ([]byte, error) {
 		return nil, fmt.Errorf("new signed data: %w", err)
 	}
 
+	extraSignedAttributes := make([]pkcs7.Attribute, 0, 2)
+	if !context.SignData.Signature.CAdES {
+		// PAdES forbids the Adobe revocationInfoArchival attribute;
+		// revocation material is carried in the /DSS dictionary instead.
+		extraSignedAttributes = append(extraSignedAttributes, pkcs7.Attribute{
+			Type:  asn1.ObjectIdentifier{1, 2, 840, 113583, 1, 1, 8},
+			Value: context.SignData.RevocationData,
+		})
+	}
+	extraSignedAttributes = append(extraSignedAttributes, *signingCertificate)
+
 	signer_config := pkcs7.SignerInfoConfig{
-		ExtraSignedAttributes: []pkcs7.Attribute{
-			{
-				Type:  asn1.ObjectIdentifier{1, 2, 840, 113583, 1, 1, 8},
-				Value: context.SignData.RevocationData,
-			},
-			*signingCertificate,
-		},
+		ExtraSignedAttributes: extraSignedAttributes,
+		// PAdES forbids signing-time as a signed attribute; the claimed
+		// time lives in the signature dictionary /M entry.
+		SkipSigningTime: context.SignData.Signature.CAdES,
 	}
 
 	// Add the first certificate chain without our own certificate.
@@ -349,27 +354,22 @@ func (context *SignContext) createSignature() ([]byte, error) {
 	// PDF needs a detached signature, meaning the content isn't included.
 	signed_data.Detach()
 
-	if context.SignData.TSA.URL != "" {
+	if context.SignData.TSA.URL != "" || context.SignData.TimestampFunction != nil {
 		signature_data := signed_data.GetSignedData()
 
-		timestamp_response, err := context.GetTSA(signature_data.SignerInfos[0].EncryptedDigest)
+		token, err := context.getTimestampToken(signature_data.SignerInfos[0].EncryptedDigest)
 		if err != nil {
-			return nil, fmt.Errorf("get timestamp: %w", err)
+			return nil, err
 		}
 
-		ts, err := timestamp.ParseResponse(timestamp_response)
-		if err != nil {
-			return nil, fmt.Errorf("parse timestamp: %w", err)
-		}
-
-		_, err = pkcs7.Parse(ts.RawToken)
+		_, err = pkcs7.Parse(token)
 		if err != nil {
 			return nil, fmt.Errorf("parse timestamp token: %w", err)
 		}
 
 		timestamp_attribute := pkcs7.Attribute{
 			Type:  asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 16, 2, 14},
-			Value: asn1.RawValue{FullBytes: ts.RawToken},
+			Value: asn1.RawValue{FullBytes: token},
 		}
 		if err := signature_data.SignerInfos[0].SetUnauthenticatedAttributes([]pkcs7.Attribute{timestamp_attribute}); err != nil {
 			return nil, err
@@ -377,6 +377,35 @@ func (context *SignContext) createSignature() ([]byte, error) {
 	}
 
 	return signed_data.Finish()
+}
+
+// getTimestampToken returns a DER-encoded RFC 3161 TimeStampToken over
+// content: from SignData.TimestampFunction when set (called with the
+// DigestAlgorithm hash of content), otherwise from the TSA.URL HTTP
+// endpoint (whose response is a full TSA response, unwrapped here).
+func (context *SignContext) getTimestampToken(content []byte) ([]byte, error) {
+	if context.SignData.TimestampFunction != nil {
+		h := context.SignData.DigestAlgorithm.New()
+		h.Write(content)
+		token, err := context.SignData.TimestampFunction(gocontext.Background(), h.Sum(nil))
+		if err != nil {
+			return nil, fmt.Errorf("timestamp function: %w", err)
+		}
+		if _, err := pkcs7.Parse(token); err != nil {
+			return nil, fmt.Errorf("parse timestamp token: %w", err)
+		}
+		return token, nil
+	}
+
+	timestamp_response, err := context.GetTSA(content)
+	if err != nil {
+		return nil, fmt.Errorf("get timestamp: %w", err)
+	}
+	ts, err := timestamp.ParseResponse(timestamp_response)
+	if err != nil {
+		return nil, fmt.Errorf("parse timestamp: %w", err)
+	}
+	return ts.RawToken, nil
 }
 
 func (context *SignContext) GetTSA(sign_content []byte) (timestamp_response []byte, err error) {

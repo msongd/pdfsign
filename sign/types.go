@@ -1,6 +1,7 @@
 package sign
 
 import (
+	"context"
 	"crypto"
 	"crypto/x509"
 	"io"
@@ -34,6 +35,15 @@ type SignData struct {
 	RevocationData     revocation.InfoArchival
 	RevocationFunction RevocationFunction
 	Appearance         Appearance
+
+	// TimestampFunction returns a DER-encoded RFC 3161 TimeStampToken (the
+	// token itself, not a full TSA response) over digest, where digest is
+	// the DigestAlgorithm hash of the content to be timestamped. When set it
+	// takes precedence over TSA.URL, for both the CMS signature timestamp
+	// and CertType TimeStampSignature document timestamps. It is called with
+	// context.Background(); implementations needing cancellation or
+	// deadlines should capture their own context in a closure.
+	TimestampFunction func(context.Context, []byte) ([]byte, error)
 
 	objectId uint32
 }
@@ -84,6 +94,13 @@ type SignDataSignature struct {
 	CertType   CertType
 	DocMDPPerm DocMDPPerm
 	Info       SignDataSignatureInfo
+
+	// CAdES selects PAdES mode (ETSI EN 319 142-1): the signature dictionary
+	// uses /SubFilter /ETSI.CAdES.detached, the CMS carries no signingTime
+	// signed attribute and no Adobe adbe-revocationInfoArchival attribute,
+	// and the claimed signing time is always written to the dictionary /M
+	// entry.
+	CAdES bool
 }
 
 type SignDataSignatureInfo struct {
