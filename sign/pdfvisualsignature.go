@@ -102,7 +102,11 @@ func (context *SignContext) createVisualSignature(visible bool, pageNumber uint3
 	// Define the field type as a signature.
 	visual_signature.WriteString("  /FT /Sig\n")
 	// Set a unique title for the signature field.
-	visual_signature.WriteString(fmt.Sprintf("  /T %s\n", pdfString("Signature "+strconv.Itoa(len(context.existingSignatures)+1))))
+	fieldName := "Signature " + strconv.Itoa(len(context.existingSignatures)+1)
+	if context.SignData.Signature.FieldName != "" {
+		fieldName = context.SignData.Signature.FieldName
+	}
+	visual_signature.WriteString(fmt.Sprintf("  /T %s\n", pdfString(fieldName)))
 
 	// Reference the signature dictionary.
 	visual_signature.WriteString(fmt.Sprintf("  /V %d 0 R\n", context.SignData.objectId))

@@ -101,6 +101,12 @@ type SignDataSignature struct {
 	// and the claimed signing time is always written to the dictionary /M
 	// entry.
 	CAdES bool
+
+	// FieldName is the /T (field title) of the signature form field created
+	// for this signature. Empty selects the default "Signature N" (N = number
+	// of existing signatures + 1). Callers must ensure uniqueness within the
+	// document; duplicate field names produce undefined viewer behavior.
+	FieldName string
 }
 
 type SignDataSignatureInfo struct {
