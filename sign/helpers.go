@@ -44,7 +44,29 @@ func pdfString(text string) string {
 		if err != nil {
 			panic(err)
 		}
-		return "(" + res + ")"
+		// Escape the PDF string-literal metacharacters at the byte level. A
+		// UTF-16BE byte stream can contain 0x28 '(', 0x29 ')' or 0x5C '\'
+		// (as an ASCII-range code unit's low byte, or within a higher code
+		// point), and an unescaped one would break out of the (...) literal.
+		// 0x0D/0x0A are escaped too so a reader's end-of-line normalization
+		// can't corrupt the UTF-16 bytes.
+		var b strings.Builder
+		b.WriteByte('(')
+		for i := 0; i < len(res); i++ {
+			switch res[i] {
+			case '\\', '(', ')':
+				b.WriteByte('\\')
+				b.WriteByte(res[i])
+			case '\r':
+				b.WriteString("\\r")
+			case '\n':
+				b.WriteString("\\n")
+			default:
+				b.WriteByte(res[i])
+			}
+		}
+		b.WriteByte(')')
+		return b.String()
 	}
 
 	// UTF-8
