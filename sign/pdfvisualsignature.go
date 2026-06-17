@@ -127,9 +127,16 @@ func (context *SignContext) createIncPageUpdate(pageNumber, annot uint32) ([]byt
 		return nil, err
 	}
 
+	// digitorus/pdf reports a *direct* value's owning object via GetPtr(), so a
+	// value that belongs to the page has GetPtr().GetID() == the page's object
+	// id. That is exactly the rootObjId convention serializeCatalogEntry uses to
+	// decide inline-vs-reference, so pass the page id when re-serializing the
+	// page's own entries.
+	pagePtr := page.GetPtr()
+	pageID := pagePtr.GetID()
+
 	page_buffer.WriteString("<<\n")
 
-	// TODO: Update digitorus/pdf to get raw values without resolving pointers
 	for _, key := range page.Keys() {
 		switch key {
 		case "Parent":
@@ -154,13 +161,32 @@ func (context *SignContext) createIncPageUpdate(pageNumber, annot uint32) ([]byt
 		case "Annots":
 			page_buffer.WriteString("  /Annots [\n")
 			for i := 0; i < page.Key("Annots").Len(); i++ {
-				ptr := page.Key(key).Index(i).GetPtr()
-				page_buffer.WriteString(fmt.Sprintf("    %d 0 R\n", ptr.GetID()))
+				item := page.Key(key).Index(i)
+				if ptr := item.GetPtr(); ptr.GetID() != pageID {
+					// A genuine indirect reference to another object.
+					page_buffer.WriteString(fmt.Sprintf("    %d %d R\n", ptr.GetID(), ptr.GetGen()))
+				} else {
+					// An inline annotation dictionary (owned by the page, e.g.
+					// FPDF2 writes /Annots as direct dicts). GetID() is the page
+					// id for these, so the old code emitted a dangling "0 0 R";
+					// re-serialize the dict instead, keeping any nested indirect
+					// references as references.
+					page_buffer.WriteString("    ")
+					context.serializeCatalogEntry(&page_buffer, pageID, item)
+					page_buffer.WriteString("\n")
+				}
 			}
 			page_buffer.WriteString(fmt.Sprintf("    %d 0 R\n", annot))
 			page_buffer.WriteString("  ]\n")
 		default:
-			page_buffer.WriteString(fmt.Sprintf("  /%s %s\n", key, page.Key(key).String()))
+			// Re-serialize via serializeCatalogEntry rather than Value.String():
+			// String() dereferences indirect entries (e.g. /Resources N 0 R) and
+			// inlines them, altering the page structure. serializeCatalogEntry
+			// preserves indirect references as references and inlines only direct
+			// values (those owned by the page, i.e. GetPtr().GetID() == pageID).
+			page_buffer.WriteString(fmt.Sprintf("  /%s ", key))
+			context.serializeCatalogEntry(&page_buffer, pageID, page.Key(key))
+			page_buffer.WriteString("\n")
 		}
 	}
 

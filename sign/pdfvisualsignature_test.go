@@ -1,7 +1,10 @@
 package sign
 
 import (
+	"bytes"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,5 +66,55 @@ func TestVisualSignature(t *testing.T) {
 
 	if string(visual_signature) != expected_visual_signature {
 		t.Errorf("Visual signature mismatch, expected\n%q\nbut got\n%q", expected_visual_signature, visual_signature)
+	}
+}
+
+// TestIncPageUpdateInlineAnnots verifies createIncPageUpdate re-serializes an
+// inline annotation dictionary (as e.g. FPDF2 emits /Annots) inline, rather
+// than collapsing it into a dangling/self reference. digitorus/pdf reports a
+// direct value's owning object via GetPtr(), so an inline annot's GetPtr().GetID()
+// is the page's id; the old code wrote that as "<pageID> 0 R", dropping the
+// annotation and corrupting the page.
+func TestIncPageUpdateInlineAnnots(t *testing.T) {
+	var b bytes.Buffer
+	offsets := map[int]int{}
+	b.WriteString("%PDF-1.4\n")
+	offsets[1] = b.Len()
+	b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+	offsets[2] = b.Len()
+	b.WriteString("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+	offsets[3] = b.Len()
+	b.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << >> " +
+		"/Annots [<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (hello-inline) >>] >>\nendobj\n")
+	xrefOff := b.Len()
+	b.WriteString("xref\n0 4\n0000000000 65535 f \n")
+	for i := 1; i <= 3; i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[i])
+	}
+	b.WriteString("trailer\n<< /Size 4 /Root 1 0 R >>\n")
+	fmt.Fprintf(&b, "startxref\n%d\n%%%%EOF\n", xrefOff)
+	data := b.Bytes()
+
+	rdr, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("failed to read constructed PDF: %v", err)
+	}
+
+	context := SignContext{PDFReader: rdr}
+	out, err := context.createIncPageUpdate(1, 5) // re-emit page 1, add widget object 5
+	if err != nil {
+		t.Fatalf("createIncPageUpdate: %v", err)
+	}
+	got := string(out)
+
+	if !strings.Contains(got, "hello-inline") {
+		t.Errorf("inline annotation was not preserved inline; got:\n%s", got)
+	}
+	if !strings.Contains(got, "5 0 R") {
+		t.Errorf("new widget reference (5 0 R) was not appended; got:\n%s", got)
+	}
+	// The inline dict must not be collapsed into a bare reference to the page.
+	if strings.Contains(got, "    3 0 R") {
+		t.Errorf("inline annotation collapsed into a self-reference; got:\n%s", got)
 	}
 }
